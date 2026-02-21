@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>我的 AI 伴读软件</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.5/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <style>
+        body { display: flex; height: 100vh; margin: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow: hidden; }
+        
+        /* 【改动 1】将阅读区比例调大（flex: 8） */
+        #reader-container { flex: 8; background-color: #fcfcfa; padding: 20px 40px; display: flex; flex-direction: column; }
+        #controls { display: flex; gap: 10px; margin-bottom: 20px; align-items: center; justify-content: space-between; }
+        
+        #viewer {
+            flex-grow: 1; 
+            width: 100%; 
+            height: 100%;
+            border: 1px dashed #ccc;
+            border-radius: 8px;
+            overflow: hidden; 
+            position: relative; 
+        }
+        #viewer iframe { max-width: 100% !important; }
+
+        /* 【改动 2】将 AI 侧边栏比例调小（flex: 2），并设置最小宽度保证可用性 */
+        #ai-sidebar { flex: 2; min-width: 300px; background-color: #ffffff; border-left: 2px solid #eaeaea; padding: 20px; display: flex; flex-direction: column; }
+        #chat-history { flex-grow: 1; overflow-y: auto; margin-bottom: 20px; padding: 10px; background-color: #f9f9f9; border-radius: 8px; }
+        #input-area { display: flex; gap: 10px; flex-direction: column; }
+        
+        #selection-tip { font-size: 12px; color: #666; margin-bottom: 5px; display: none; }
+        
+        input { padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        /* === 防止阅读器往右推屏幕的终极约束 === */
+        body { overflow-x: hidden; }
+
+        #reader-container {
+            min-width: 0;           /* flex 子项关键！防止膨胀 */
+            overflow: hidden;
+        }
+
+        #viewer {
+            min-width: 0;
+            overflow: hidden;
+            box-sizing: border-box;
+        }
+
+        #viewer iframe {
+            width: 100% !important;
+            max-width: 100% !important;
+            height: 100% !important;
+            border: none !important;
+        }
+
+        #ai-sidebar {
+            flex-shrink: 0;         /* 右边栏不被挤压 */
+        }
+        /* === 终极防推屏 + 内存安全约束 === */
+        body { 
+            overflow-x: hidden; 
+            box-sizing: border-box; 
+        }
+        #reader-container, #viewer { 
+            min-width: 0; 
+            flex-shrink: 1; 
+            overflow: hidden; 
+            box-sizing: border-box; 
+        }
+        #viewer iframe { 
+            width: 100% !important; 
+            max-width: 100% !important; 
+            height: 100% !important; 
+            border: none !important; 
+            box-sizing: border-box; 
+        }
+        #ai-sidebar { flex-shrink: 0; min-width: 300px; }
+/* === 总结卡片 & 高亮样式 === */
+.summary-cards { margin: 15px 0; }
+.summary-card {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    background: #fff;
+    overflow: hidden;
+}
+.summary-card > summary {
+    padding: 12px 15px;
+    background: #f1f3f5;
+    font-weight: bold;
+    cursor: pointer;
+    list-style: none;
+}
+.summary-card > div {
+    padding: 15px;
+    border-top: 1px solid #eee;
+    line-height: 1.7;
+}
+.summary-card summary:hover { background: #e9ecef; }
+
+.highlight-btn {
+    margin-top: 10px;
+    padding: 8px 16px;
+    background: #17a2b8;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+.highlight-btn:hover { background: #138496; }
+
+/* 高亮标记 */
+mark {
+    background: #ffeb3b !important;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+/* === 阅读设置面板 === */
+#settings-btn { background:#6c757d; }
+#settings-panel {
+    position: fixed; right: -320px; top: 0; bottom: 0; width: 320px;
+    background: white; box-shadow: -4px 0 20px rgba(0,0,0,0.15);
+    transition: right 0.3s ease; z-index: 1000; padding: 20px; overflow-y: auto;
+    border-left: 1px solid #ddd;
+}
+#settings-panel.open { right: 0; }
+#settings-panel h3 { margin-top: 0; }
+.setting-item { margin-bottom: 18px; }
+.setting-item label { display: block; margin-bottom: 6px; font-weight: bold; }
+input[type="range"] { width: 100%; }
+input[type="color"] { width: 60px; height: 30px; vertical-align: middle; }
+.theme-btn {
+    padding: 8px 16px; margin: 4px; border: none; border-radius: 6px; cursor: pointer;
+}
+#close-settings { float: right; font-size: 20px; cursor: pointer; }
+/* === 防文字出格 + 行距强制生效 === */
+#viewer, #viewer iframe {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 100% !important;
+    overflow: hidden !important;
+    box-sizing: border-box;
+}
+
+#viewer iframe {
+    border: none !important;
+}
+
+#viewer iframe body,
+#viewer iframe p,
+#viewer iframe div,
+#viewer iframe span {
+    max-width: 100% !important;
+    word-break: break-word !important;
+    overflow-wrap: break-word !important;
+}
+    </style>
+</head>
+<body>
+
+    <div id="reader-container">
+<div id="controls">
+    <div><input type="file" id="book-upload" accept=".epub"></div>
+    <div style="display:flex; gap:8px; align-items:center;">
+        <button id="prev-btn">上一页</button>
+        <button id="next-btn">下一页</button>
+        
+        <select id="summary-mode" style="padding:8px 12px; border-radius:4px; border:1px solid #ccc;">
+            <option value="current">📄 当前页</option>
+            <option value="last3">📚 最近3页</option>
+            <option value="chapter">📖 本章完整</option>
+        </select>
+        
+        <button id="summary-btn" style="background-color:#28a745;">📝 一键总结</button>
+        <button id="settings-btn" style="background:#6c757d;color:white;" title="阅读设置">⚙️ 设置</button>
+    </div>
+</div>
+<!-- 美观阅读设置弹窗 -->
+<div id="settings-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:2000; align-items:center; justify-content:center;">
+    <div style="background:white; width:380px; border-radius:12px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,0.2); max-height:90vh; overflow-y:auto;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+            <h3 style="margin:0;">📖 阅读设置</h3>
+            <span id="close-modal" style="font-size:24px; cursor:pointer; color:#999;">✕</span>
+        </div>
+        
+        <div style="margin-bottom:20px;">
+            <label style="display:block; margin-bottom:8px; font-weight:bold;">字体大小 <span id="font-size-val">18</span>px</label>
+            <input type="range" id="font-size" min="12" max="32" value="18" step="1" style="width:100%;">
+        </div>
+        
+        <div style="margin-bottom:20px;">
+            <label style="display:block; margin-bottom:8px; font-weight:bold;">行距 <span id="line-height-val">1.6</span></label>
+            <input type="range" id="line-height" min="1.0" max="2.5" value="1.6" step="0.1" style="width:100%;">
+        </div>
+        
+        <div style="margin-bottom:20px;">
+            <label style="display:block; margin-bottom:8px; font-weight:bold;">页边距 <span id="margin-val">40</span>px</label>
+            <input type="range" id="margin" min="0" max="80" value="40" step="2" style="width:100%;">
+        </div>
+        
+        <div style="margin-bottom:20px;">
+            <label style="display:block; margin-bottom:8px; font-weight:bold;">主题</label>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button class="theme-btn" data-theme="light" style="flex:1; padding:10px; background:#f8f9fa; color:#333; border:1px solid #ddd; border-radius:6px;">浅色</button>
+                <button class="theme-btn" data-theme="dark" style="flex:1; padding:10px; background:#1e1e1e; color:#eee; border:1px solid #ddd; border-radius:6px;">夜间</button>
+                <button class="theme-btn" data-theme="eye" style="flex:1; padding:10px; background:#e6f0d6; color:#333; border:1px solid #ddd; border-radius:6px;">护眼绿</button>
+                <button id="custom-color-btn" style="flex:1; padding:10px; background:#fff; border:1px solid #ddd; border-radius:6px;">自定义颜色</button>
+                <input type="color" id="custom-bg" value="#f8f9fa" style="display:none;">
+            </div>
+        </div>
+    </div>
+</div>
+        <div id="viewer"></div>
+    </div> <div id="ai-sidebar">
+        <h2>🤖 AI 伴读助手</h2>
+        <div id="chat-history">
+            <p><strong>AI:</strong> 你好！试着在左边书里用鼠标划选一段文字，看看会发生什么？</p>
+        </div>
+        <div id="input-area">
+            <span id="selection-tip">已自动引用原文，请在下方提问：</span>
+            <input type="text" id="user-input" placeholder="输入你想问的问题...">
+            <button id="send-btn">发送</button>
+        </div>
+    </div>
+
+<script>
+    let currentSelectedText = "";
+    let lastPageTexts = [];
+
+    /* === 聊天逻辑 === */
+    const sendBtn = document.getElementById('send-btn');
+    const userInput = document.getElementById('user-input');
+    const chatHistory = document.getElementById('chat-history');
+    const selectionTip = document.getElementById('selection-tip');
+
+    userInput.addEventListener('keypress', e => { if (e.key === 'Enter') sendBtn.click(); });
+    sendBtn.addEventListener('click', async () => await sendToAI(userInput.value.trim(), currentSelectedText, false));
+
+    /* === 一键总结（保持不变）=== */
+    const summaryBtn = document.getElementById('summary-btn');
+    const summaryMode = document.getElementById('summary-mode');
+
+    summaryBtn.addEventListener('click', async () => {
+        if (!rendition) { alert('请先打开一本书！'); return; }
+        summaryBtn.disabled = true;
+        summaryBtn.textContent = summaryMode.value === 'chapter' ? '⏳ 正在提取完整章节...' : '⏳ 正在提取并总结...';
+
+        let pageText = '';
+        if (summaryMode.value === 'current') pageText = await getCurrentPageText();
+        else if (summaryMode.value === 'last3') pageText = lastPageTexts.length ? lastPageTexts.join('\n\n') : await getCurrentPageText();
+        else if (summaryMode.value === 'chapter') pageText = await getCurrentChapterText();
+
+        if (pageText.length < 50) {
+            alert('当前内容太少，请翻页后重试～');
+            summaryBtn.disabled = false;
+            summaryBtn.textContent = '📝 一键总结';
+            return;
+        }
+        if (pageText.length > 7500) pageText = pageText.substring(0, 7500) + '\n（已截断）';
+
+        const summaryQuestion = "请严格按以下格式输出（每段一个卡片）：\n1. 【第1段大意】xxx\n与前文联系：xxx\n2. 【第2段大意】xxx\n与前文联系：xxx\n...\n最后用一句话总结本页/这几页在全书中的作用。";
+        await sendToAI(summaryQuestion, pageText, true);
+
+        summaryBtn.disabled = false;
+        summaryBtn.textContent = '📝 一键总结';
+    });
+
+    /* === 阅读器核心 === */
+    const uploadInput = document.getElementById('book-upload');
+    const viewer = document.getElementById('viewer');
+    let book = null;
+    let rendition = null;
+
+    function forceResize() {
+        if (rendition) rendition.resize(Math.max(viewer.clientWidth, 600), Math.max(viewer.clientHeight, 400));
+    }
+
+    function cacheCurrentPage() {
+        getCurrentPageText().then(text => {
+            if (text.length > 30) {
+                lastPageTexts.push(text);
+                if (lastPageTexts.length > 3) lastPageTexts.shift();
+            }
+        });
+    }
+
+    uploadInput.addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        viewer.innerHTML = '<div style="text-align:center;padding-top:100px;color:#666;">📖 正在加载...</div>';
+
+        const reader = new FileReader();
+        reader.onload = function(event) {
+            if (book) book.destroy();
+            if (rendition) rendition.destroy();
+            viewer.innerHTML = '';
+
+            book = ePub(event.target.result);
+          rendition = book.renderTo("viewer", {
+    width: "100%", 
+    height: "100%", 
+    spread: "none",           // 强制单页
+    minSpreadWidth: 0,        // 彻底禁止双页
+    flow: "paginated", 
+    contained: true
+});
+            rendition.display().then(() => {
+                setTimeout(() => {
+                    loadReadingSettings();
+                    applyReadingSettings();
+                    bindRenditionEvents();
+                }, 400);   // 增加延迟，保证 iframe 完全加载
+            });
+
+            rendition.on('selected', function(cfiRange) {
+                const range = rendition.getRange(cfiRange);
+                currentSelectedText = range.toString().trim();
+                const len = currentSelectedText.length;
+                selectionTip.textContent = `已选中 ${len} 字原文，请在下方提问：`;
+                selectionTip.style.display = 'block';
+                userInput.focus();
+                setTimeout(() => window.getSelection().removeAllRanges(), 100);
+            });
+        };
+        reader.readAsArrayBuffer(file);
+    });
+
+    document.getElementById('next-btn').addEventListener('click', () => rendition && rendition.next().then(() => { forceResize(); setTimeout(cacheCurrentPage, 800); }));
+    document.getElementById('prev-btn').addEventListener('click', () => rendition && rendition.prev().then(() => { forceResize(); setTimeout(cacheCurrentPage, 800); }));
+    window.addEventListener('resize', () => requestAnimationFrame(forceResize));
+
+    /* === 通用发送函数（保持不变）=== */
+    async function sendToAI(question, selectedText = "", isSummary = false) {
+        if (!question) return;
+        const userMessage = document.createElement('p');
+        userMessage.innerHTML = `<strong>你:</strong> ${question}`;
+        chatHistory.appendChild(userMessage);
+
+        const aiMessage = document.createElement('p');
+        aiMessage.innerHTML = '<strong>AI:</strong> 🧠 正在思考中...';
+        chatHistory.appendChild(aiMessage);
+        chatHistory.scrollTop = chatHistory.scrollHeight;
+
+        try {
+            const response = await fetch('/ask', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ selected_text: selectedText, question: question })
+            });
+            const result = await response.json();
+            if (result.status === "success") {
+                let html = marked.parse(result.reply, { breaks: true });
+                if (isSummary) {
+                    html = '<div class="summary-cards">' + result.reply.split(/\n(?=\d+\.)/).map(section => {
+                        return `<details class="summary-card"><summary>${section.split('\n')[0]}</summary><div>${marked.parse(section)}</div></details>`;
+                    }).join('') + '</div>';
+                    html += `<button class="highlight-btn" onclick="highlightCurrentPage(this)">🔦 高亮原文关键句</button>`;
+                }
+                aiMessage.innerHTML = `<strong>AI:</strong> ${html}`;
+            } else {
+                aiMessage.innerHTML = `<strong>AI:</strong> ❌ ${result.reply}`;
+            }
+        } catch (e) {
+            aiMessage.innerHTML = '<strong>AI:</strong> ❌ 无法连接后端！';
+        }
+        chatHistory.scrollTop = chatHistory.scrollHeight;
+    }
+
+    /* === 高亮 & 文本函数（保持不变）=== */
+    window.highlightCurrentPage = function(btn) { /* 原样保留 */ 
+        const contents = rendition.getContents();
+        const summaryText = btn.parentElement.textContent;
+        const keySentences = summaryText.split(/[。！？]/).filter(s => s.length > 8).map(s => s.trim());
+        contents.forEach(content => {
+            if (content?.document?.body) {
+                let html = content.document.body.innerHTML;
+                keySentences.forEach(s => {
+                    const escaped = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    html = html.replace(new RegExp(escaped, 'gi'), m => `<mark>${m}</mark>`);
+                });
+                content.document.body.innerHTML = html;
+            }
+        });
+        btn.textContent = '✅ 已高亮（刷新清除）';
+        btn.disabled = true;
+    };
+
+    async function getCurrentPageText() {
+        let text = '';
+        rendition.getContents().forEach(c => {
+            if (c?.document?.body) text += c.document.body.innerText.trim() + '\n\n';
+        });
+        return text.trim();
+    }
+
+    async function getCurrentChapterText() {
+        if (!book || !rendition?.location) return await getCurrentPageText();
+        try {
+            const section = book.spine.get(rendition.location.start.cfi);
+            if (section) {
+                const html = await section.render();
+                const div = document.createElement('div');
+                div.innerHTML = html;
+                return div.innerText.trim();
+            }
+        } catch (e) {}
+        return await getCurrentPageText();
+    }
+
+    /* === 阅读设置 - 终极版（已验证有效）=== */
+    const settingsBtn = document.getElementById('settings-btn');
+    const settingsModal = document.getElementById('settings-modal');
+    const closeModal = document.getElementById('close-modal');
+
+    const fontSizeSlider = document.getElementById('font-size');
+    const lineHeightSlider = document.getElementById('line-height');
+    const marginSlider = document.getElementById('margin');
+    const fontSizeVal = document.getElementById('font-size-val');
+    const lineHeightVal = document.getElementById('line-height-val');
+    const marginVal = document.getElementById('margin-val');
+
+    let currentTheme = 'light';
+    let customBgColor = '#f8f9fa';
+
+    settingsBtn.addEventListener('click', () => settingsModal.style.display = 'flex');
+    closeModal.addEventListener('click', () => settingsModal.style.display = 'none');
+    settingsModal.addEventListener('click', e => { if (e.target === settingsModal) settingsModal.style.display = 'none'; });
+
+    function updateAndApply() {
+        fontSizeVal.textContent = fontSizeSlider.value;
+        lineHeightVal.textContent = lineHeightSlider.value;
+        marginVal.textContent = marginSlider.value;
+        applyReadingSettings();
+    }
+    fontSizeSlider.addEventListener('input', updateAndApply);
+    lineHeightSlider.addEventListener('input', updateAndApply);
+    marginSlider.addEventListener('input', updateAndApply);
+
+    document.querySelectorAll('.theme-btn[data-theme]').forEach(btn => {
+        btn.addEventListener('click', () => { currentTheme = btn.dataset.theme; updateAndApply(); });
+    });
+    document.getElementById('custom-color-btn').addEventListener('click', () => document.getElementById('custom-bg').click());
+    document.getElementById('custom-bg').addEventListener('input', e => {
+        customBgColor = e.target.value;
+        currentTheme = 'custom';
+        updateAndApply();
+    });
+
+   function applyReadingSettings() {
+    if (!rendition) return;
+
+    const fs = fontSizeSlider.value + 'px';
+    const lh = lineHeightSlider.value;
+    const mg = marginSlider.value + 'px';
+
+    let bg = '#f8f9fa', color = '#333333';
+    if (currentTheme === 'dark') { bg = '#1e1e1e'; color = '#eeeeee'; }
+    else if (currentTheme === 'eye') { bg = '#e6f0d6'; color = '#333333'; }
+    else if (currentTheme === 'custom') { bg = customBgColor; color = '#333333'; }
+
+    // 强制单页模式（防止偷偷变双页）
+    rendition.spread("none");
+
+    // 1. themes 注入
+    rendition.themes.register('custom-theme', {
+        'body': { 'background-color': bg, 'color': color, 'font-family': 'Georgia, "Noto Serif SC", serif' }
+    });
+    rendition.themes.select('custom-theme');
+
+    // 2. 直接操作 iframe 根节点（最强方式）
+    const iframe = viewer.querySelector('iframe');
+    if (iframe && iframe.contentDocument && iframe.contentDocument.documentElement) {
+        const root = iframe.contentDocument.documentElement;
+        root.style.setProperty('font-size', fs, 'important');
+        root.style.setProperty('line-height', lh, 'important');
+        root.style.setProperty('padding-left', mg, 'important');
+        root.style.setProperty('padding-right', mg, 'important');
+        root.style.setProperty('background-color', bg, 'important');
+        root.style.setProperty('color', color, 'important');
+        root.style.setProperty('max-width', '100%', 'important');
+        root.style.setProperty('box-sizing', 'border-box', 'important');
+    }
+
+    // 3. 对所有元素注入（解决行距被 EPUB 内部 CSS 覆盖）
+    ['body', 'p', 'div', 'span', 'li', 'h1', 'h2', 'h3', '.epub-view', '.epub-view > div'].forEach(tag => {
+        rendition.themes.override(tag, { 
+            'font-size': fs, 
+            'line-height': lh,
+            'padding-left': mg,
+            'padding-right': mg
+        });
+    });
+
+    // 4. 多次强制重绘（解决出格）
+    rendition.resize(viewer.clientWidth, viewer.clientHeight);
+    setTimeout(() => rendition.resize(viewer.clientWidth, viewer.clientHeight), 80);
+    setTimeout(() => rendition.resize(viewer.clientWidth, viewer.clientHeight), 200);
+    setTimeout(() => rendition.resize(viewer.clientWidth, viewer.clientHeight), 400);
+
+    // 保存设置
+    localStorage.setItem('readingSettings', JSON.stringify({
+        fontSize: fontSizeSlider.value,
+        lineHeight: lineHeightSlider.value,
+        margin: marginSlider.value,
+        theme: currentTheme,
+        customBg: customBgColor
+    }));
+}
+
+    function loadReadingSettings() {
+        const saved = localStorage.getItem('readingSettings');
+        if (saved) {
+            const s = JSON.parse(saved);
+            fontSizeSlider.value = s.fontSize || 18;
+            lineHeightSlider.value = s.lineHeight || 1.6;
+            marginSlider.value = s.margin || 40;
+            currentTheme = s.theme || 'light';
+            if (s.customBg) {
+                customBgColor = s.customBg;
+                document.getElementById('custom-bg').value = s.customBg;
+            }
+            fontSizeVal.textContent = fontSizeSlider.value;
+            lineHeightVal.textContent = lineHeightSlider.value;
+            marginVal.textContent = marginSlider.value;
+        }
+    }
+
+    function bindRenditionEvents() {
+        if (rendition) {
+            rendition.on('relocated', applyReadingSettings);
+            rendition.on('rendered', applyReadingSettings);
+        }
+    }
+</script>
+
+</body>
+</html>
