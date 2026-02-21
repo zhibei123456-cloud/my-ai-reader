@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>我的 AI 伴读软件</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.5/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+
+    <style>
+        body { display: flex; height: 100vh; margin: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow: hidden; }
+        
+        /* 【改动 1】将阅读区比例调大（flex: 8） */
+        #reader-container { flex: 8; background-color: #fcfcfa; padding: 20px 40px; display: flex; flex-direction: column; }
+        #controls { display: flex; gap: 10px; margin-bottom: 20px; align-items: center; justify-content: space-between; }
+        
+        #viewer {
+            flex-grow: 1; 
+            width: 100%; 
+            height: 100%;
+            border: 1px dashed #ccc;
+            border-radius: 8px;
+            overflow: hidden; 
+            position: relative; 
+        }
+        #viewer iframe { max-width: 100% !important; }
+
+        /* 【改动 2】将 AI 侧边栏比例调小（flex: 2），并设置最小宽度保证可用性 */
+        #ai-sidebar { flex: 2; min-width: 300px; background-color: #ffffff; border-left: 2px solid #eaeaea; padding: 20px; display: flex; flex-direction: column; }
+        #chat-history { flex-grow: 1; overflow-y: auto; margin-bottom: 20px; padding: 10px; background-color: #f9f9f9; border-radius: 8px; }
+        #input-area { display: flex; gap: 10px; flex-direction: column; }
+        
+        #selection-tip { font-size: 12px; color: #666; margin-bottom: 5px; display: none; }
+        
+        input { padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+    </style>
+</head>
+<body>
+
+    <div id="reader-container">
+        <div id="controls">
+            <div><input type="file" id="book-upload" accept=".epub"></div>
+            <div>
+                <button id="prev-btn">上一页</button>
+                <button id="next-btn">下一页</button>
+            </div>
+        </div>
+        <div id="viewer"></div>
+    </div> <div id="ai-sidebar">
+        <h2>🤖 AI 伴读助手</h2>
+        <div id="chat-history">
+            <p><strong>AI:</strong> 你好！试着在左边书里用鼠标划选一段文字，看看会发生什么？</p>
+        </div>
+        <div id="input-area">
+            <span id="selection-tip">已自动引用原文，请在下方提问：</span>
+            <input type="text" id="user-input" placeholder="输入你想问的问题...">
+            <button id="send-btn">发送</button>
+        </div>
+    </div>
+
+    <script>
+        /* === 右侧聊天逻辑 === */
+        const sendBtn = document.getElementById('send-btn');
+        const userInput = document.getElementById('user-input');
+        const chatHistory = document.getElementById('chat-history');
+        const selectionTip = document.getElementById('selection-tip');
+
+        sendBtn.addEventListener('click', async function() {
+            const text = userInput.value;
+            if (text === "") return;
+
+            // 1. 先把你发的消息显示在屏幕上
+            const userMessage = document.createElement('p');
+            userMessage.innerHTML = '<strong>你:</strong> ' + text;
+            chatHistory.appendChild(userMessage);
+            
+            // 提取原文和问题（这里做个简单的拆分，把“【引用原文】”的内容单独提取出来）
+            let originalText = "";
+            let question = text;
+            if(text.includes("【引用原文】")){
+                originalText = text.substring(text.indexOf('：') + 1, text.indexOf(' \n\n我的问题是：'));
+                question = text.substring(text.indexOf(' \n\n我的问题是：') + 10);
+            }
+
+            userInput.value = "";
+            selectionTip.style.display = 'none';
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+
+            // 2. 显示“AI 正在思考”的占位符
+            const aiMessage = document.createElement('p');
+            aiMessage.innerHTML = '<strong>AI:</strong> 🧠 正在思考中...';
+            chatHistory.appendChild(aiMessage);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+
+            // 3. 【新功能】通过网络把数据打包发送给 Python 后端
+            try {
+                const response = await fetch('/ask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        selected_text: originalText,
+                        question: question
+                    })
+                });
+                
+                const result = await response.json();
+                
+                // 4. 收到后端送回来的答案后，替换掉“思考中”的文本
+                if(result.status === "success") {
+                    // 把 AI 返回的内容里的换行符转换成网页的换行标签
+                    const formattedReply = result.reply.replace(/\n/g, '<br>');
+                    aiMessage.innerHTML = '<strong>AI:</strong> ' + formattedReply;
+                } else {
+                    aiMessage.innerHTML = '<strong>AI:</strong> ❌ 报错了：' + result.reply;
+                }
+            } catch (error) {
+                aiMessage.innerHTML = '<strong>AI:</strong> ❌ 无法连接到后端服务器，请确认 app.py 是否已经运行！';
+            }
+            
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+        });
+
+        /* === 左侧阅读器及划词联动逻辑 === */
+        const uploadInput = document.getElementById('book-upload');
+        const viewer = document.getElementById('viewer'); 
+        let book;
+        let rendition;
+
+        uploadInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const bookData = event.target.result;
+                if (book) book.destroy(); 
+                viewer.innerHTML = ''; 
+
+                book = ePub(bookData);
+                const viewerWidth = viewer.offsetWidth;
+
+                rendition = book.renderTo("viewer", {
+                    width: viewerWidth, 
+                    height: "100%",
+                    spread: "none"
+                });
+                
+                rendition.display();
+
+                // 监听划词联动
+                rendition.on('selected', function(cfiRange, contents) {
+                    const range = rendition.getRange(cfiRange);
+                    const selectedText = range.toString();
+                    
+                    userInput.value = `【引用原文】："${selectedText}" \n\n我的问题是：`;
+                    selectionTip.style.display = 'block';
+                    userInput.focus();
+                });
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        document.getElementById('next-btn').addEventListener('click', () => rendition && rendition.next());
+        document.getElementById('prev-btn').addEventListener('click', () => rendition && rendition.prev());
+        
+        window.addEventListener('resize', function(){
+            if(rendition) {
+                const viewerWidth = viewer.offsetWidth;
+                rendition.resize(viewerWidth, "100%");
+            }
+        });
+    </script>
+
+</body>
+</html>
